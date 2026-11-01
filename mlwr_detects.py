@@ -72,12 +72,25 @@ class ScannerError(RuntimeError):
     pass
 
 
+# type normalizers
+def _as_dict(value) -> Dict[str, Any]:
+
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value) -> list:
+
+    return value if isinstance(value, list) else []
+
+
 # VirusTotal
 async def fetch_virustotal(
     session: aiohttp.ClientSession, file_hash: str
 ) -> Optional[Dict[str, Any]]:
-    if not VT_API_KEY:
-        raise ScannerError("VirusTotal API key is not set (env VT_API_KEY).")
+    if not VT_API_KEY or VT_API_KEY == "CHANGETHIS":
+        raise ScannerError(
+            "VirusTotal API key is not set. Edit VT_API_KEY in the script."
+        )
 
     url = f"{VT_API_BASE}/files/{file_hash}"
     headers = {"x-apikey": VT_API_KEY, "accept": "application/json"}
@@ -139,7 +152,7 @@ async def fetch_malwarebazaar(
     session: aiohttp.ClientSession, file_hash: str
 ) -> Optional[Dict[str, Any]]:
     headers = {}
-    if MB_AUTH_KEY:
+    if MB_AUTH_KEY and MB_AUTH_KEY != "CHANGETHIS":
         headers["Auth-Key"] = MB_AUTH_KEY
 
     data = {"query": "get_info", "hash": file_hash}
@@ -147,6 +160,8 @@ async def fetch_malwarebazaar(
     try:
         async with session.post(MB_API_URL, data=data, headers=headers) as resp:
             payload = await resp.json(content_type=None)
+            if not isinstance(payload, dict):
+                return None
             if payload.get("query_status") == "hash_not_found":
                 return None
             if payload.get("query_status") != "ok":
@@ -157,12 +172,15 @@ async def fetch_malwarebazaar(
 
 
 def parse_mb_info(mb_data: Dict[str, Any]) -> Dict[str, Any]:
-    entry = mb_data.get("data", [{}])[0] if mb_data.get("data") else {}
+    data_list = _as_list(mb_data.get("data"))
+    entry = _as_dict(data_list[0]) if data_list else {}
 
-    vendor_intel_raw = entry.get("vendor_intel", {}) or {}
+    # vendor_intel
+    vendor_intel_raw = _as_dict(entry.get("vendor_intel"))
     vendor_summary: Dict[str, Dict[str, Any]] = {}
     for vendor, intel in vendor_intel_raw.items():
-        if not isinstance(intel, dict):
+        intel = _as_dict(intel)
+        if not intel:
             continue
         keep = {}
         for key in (
@@ -191,8 +209,9 @@ def parse_mb_info(mb_data: Dict[str, Any]) -> Dict[str, Any]:
 
     # yara_rules
     yara_rules = []
-    for rule in entry.get("yara_rules", []) or []:
-        if isinstance(rule, dict):
+    for rule in _as_list(entry.get("yara_rules")):
+        rule = _as_dict(rule)
+        if rule:
             yara_rules.append(
                 {
                     "name": rule.get("rule_name") or rule.get("name"),
@@ -203,7 +222,7 @@ def parse_mb_info(mb_data: Dict[str, Any]) -> Dict[str, Any]:
             )
 
     # code_sign
-    cs = entry.get("code_sign", {}) or {}
+    cs = _as_dict(entry.get("code_sign"))
     code_sign = {
         "subject_cn": cs.get("subject_cn"),
         "issuer_cn": cs.get("issuer_cn"),
@@ -215,11 +234,13 @@ def parse_mb_info(mb_data: Dict[str, Any]) -> Dict[str, Any]:
         "cscb_reason": cs.get("cscb_reason"),
     } if cs else {}
 
-    # delivery_method
-    dm = entry.get("delivery_method", {}) or {}
+    # delivery_method 
+    dm = entry.get("delivery_method")
+    if not isinstance(dm, (dict, str)):
+        dm = {}
 
     # OLE info (for docs)
-    ole = entry.get("ole_information", {}) or {}
+    ole = _as_dict(entry.get("ole_information"))
 
     return {
         # identificators
@@ -245,7 +266,7 @@ def parse_mb_info(mb_data: Dict[str, Any]) -> Dict[str, Any]:
         "anonymous": entry.get("anonymous"),
         # classification
         "signature": entry.get("signature"),
-        "tags": entry.get("tags", []),
+        "tags": _as_list(entry.get("tags")),
         # delivery
         "delivery_method": dm,
         # YARA
@@ -394,15 +415,17 @@ def print_report(
         if m["anonymous"] is not None:
             print(f"{bold('Anonymous:')} {m['anonymous']}")
 
-        # Delivery
+        # Delivery — may be a dict or a plain string
         dm = m["delivery_method"]
-        if dm:
+        if isinstance(dm, dict) and dm:
             dm_parts = []
             for k, v in dm.items():
                 if v:
                     dm_parts.append(f"{k}={v}" if not isinstance(v, bool) else k)
             if dm_parts:
                 print(f"{bold('Delivery:')} {', '.join(dm_parts)}")
+        elif isinstance(dm, str) and dm.strip():
+            print(f"{bold('Delivery:')} {dm}")
 
         # Hashes / fingerprints
         if m["imphash"]:
@@ -416,7 +439,7 @@ def print_report(
 
         # Code signature
         cs = m["code_sign"]
-        if cs and any(cs.values()):
+        if isinstance(cs, dict) and any(cs.values()):
             print(bold("\nCode signature:"))
             for k in (
                 "subject_cn",
@@ -436,7 +459,7 @@ def print_report(
 
         # OLE
         ole = m["ole_information"]
-        if ole and any(ole.values()):
+        if isinstance(ole, dict) and any(ole.values()):
             print(bold("\nOLE information:"))
             if ole.get("oleid"):
                 print(f"  {cyan('oleid')}: {ole['oleid']}")
@@ -445,9 +468,11 @@ def print_report(
 
         # YARA
         yara = m["yara_rules"]
-        if yara:
+        if isinstance(yara, list) and yara:
             print(bold("\nYARA rules:"))
             for rule in yara:
+                if not isinstance(rule, dict):
+                    continue
                 line = f"  {yellow('-')} {bold(rule.get('name') or 'unnamed')}"
                 if rule.get("author"):
                     line += f" {dim('(author: ' + str(rule['author']) + ')')}"
@@ -459,9 +484,11 @@ def print_report(
 
         # Vendor intel
         vi = m["vendor_intel"]
-        if vi:
+        if isinstance(vi, dict) and vi:
             print(bold("\nVendor intel:"))
             for vendor, info in vi.items():
+                if not isinstance(info, dict):
+                    continue
                 parts = []
                 for k, v in info.items():
                     if isinstance(v, list):
