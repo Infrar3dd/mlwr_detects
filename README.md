@@ -4,8 +4,7 @@ Script to get detects from VirusTotal and MalwareBazaar by hash
 
 ### Requirements
 
-```aiohttp>=3.9.0```
-
+- ```aiohttp>=3.9.0```
 - VirusTotal API Key
 - MalwareBazaar Auth Key
 
